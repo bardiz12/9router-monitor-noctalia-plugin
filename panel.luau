@@ -168,7 +168,7 @@ end
 local render
 
 local function render_tabs()
-    return ui.row({ align = "center", justify = "space_between", gap = 8 }, {
+    return ui.row({ key = "panel-tabs", align = "center", justify = "space_between", gap = 8 }, {
         ui.row({ align = "center", gap = 4 }, {
             ui.button({
                 text = noctalia.tr("tab.activity"),
@@ -260,6 +260,7 @@ local function render_activity_view()
     end
 
     table.insert(items, ui.column({
+        key = "activity-hero",
         fill = "surface_variant/0.4",
         border = meta_color .. "/0.3",
         borderWidth = 1,
@@ -268,11 +269,12 @@ local function render_activity_view()
         gap = 4,
     }, hero_children))
 
-    table.insert(items, ui.separator({}))
+    table.insert(items, ui.separator({ key = "activity-sep-1" }))
 
     -- Authentication banner when expired
     if auth == "expired" then
         table.insert(items, ui.row({
+            key = "activity-auth-expired",
             fill = "error/0.12",
             border = "error/0.4",
             borderWidth = 1,
@@ -363,12 +365,15 @@ local function render_activity_view()
         }),
     })
 
-    table.insert(items, ui.column({ gap = 6 }, {
+    table.insert(items, ui.column({
+        key = "activity-overview",
+        gap = 6,
+    }, {
         overview_header,
         stats_grid,
     }))
 
-    table.insert(items, ui.separator({}))
+    table.insert(items, ui.separator({ key = "activity-sep-2" }))
 
     -- 3. Active Requests (when traffic flows)
     if #active_list > 0 then
@@ -403,7 +408,7 @@ local function render_activity_view()
             }))
         end
 
-        table.insert(items, ui.column({ gap = 6 }, active_cards))
+        table.insert(items, ui.column({ key = "activity-active", gap = 6 }, active_cards))
     end
 
     -- 4. Recent Requests List (with In/Out tokens and cost)
@@ -482,7 +487,7 @@ local function render_activity_view()
         end
     end
 
-    table.insert(items, ui.column({ gap = 6 }, recent_cards))
+    table.insert(items, ui.column({ key = "activity-recent", gap = 6 }, recent_cards))
 
     -- 5. Footer Actions
     local footer_buttons = {
@@ -507,7 +512,7 @@ local function render_activity_view()
         }))
     end
 
-    table.insert(items, ui.row({ gap = 8, align = "center" }, footer_buttons))
+    table.insert(items, ui.row({ key = "activity-footer", gap = 8, align = "center" }, footer_buttons))
 
     if status.last_fetch_text and status.last_fetch_text ~= "" then
         table.insert(items, ui.label({
@@ -638,7 +643,7 @@ local function render_models_view()
         end
     end
 
-    table.insert(items, ui.column({ gap = 6 }, model_section_children))
+    table.insert(items, ui.column({ key = "models-content", gap = 6 }, model_section_children))
 
     -- Footer Actions
     local footer_buttons = {
@@ -655,7 +660,7 @@ local function render_models_view()
         }),
     }
 
-    table.insert(items, ui.row({ gap = 8, align = "center" }, footer_buttons))
+    table.insert(items, ui.row({ key = "models-footer", gap = 8, align = "center" }, footer_buttons))
 
     return items
 end
@@ -666,7 +671,7 @@ local function render_quotas_view()
     local qlist = status.quotas or {}
     local items = {}
 
-    table.insert(items, ui.row({ align = "center", justify = "space_between" }, {
+    table.insert(items, ui.row({ key = "quotas-header", align = "center", justify = "space_between" }, {
         ui.label({ text = noctalia.tr("panel.quota_tracker"), fontWeight = "bold", fontSize = 13, color = "on_surface" }),
         ui.button({
             text = noctalia.tr("panel.refresh"),
@@ -681,6 +686,7 @@ local function render_quotas_view()
 
     if #qlist == 0 then
         table.insert(items, ui.column({
+            key = "quotas-empty",
             fill = "surface_variant/0.3",
             radius = 10,
             padding = 16,
@@ -691,7 +697,7 @@ local function render_quotas_view()
             ui.label({ text = noctalia.tr("panel.no_quotas"), fontSize = 12, color = "on_surface_variant" }),
         }))
     else
-        for _, prov in ipairs(qlist) do
+        for idx, prov in ipairs(qlist) do
             local card_children = {}
 
             -- Provider Header
@@ -794,6 +800,7 @@ local function render_quotas_view()
             end
 
             table.insert(items, ui.column({
+                key = "quotas-prov-" .. (prov.provider or tostring(idx)),
                 fill = "surface_variant/0.25",
                 radius = 8,
                 padding = 10,
@@ -803,7 +810,7 @@ local function render_quotas_view()
     end
 
     -- Footer Actions
-    table.insert(items, ui.row({ gap = 8, align = "center" }, {
+    table.insert(items, ui.row({ key = "quotas-footer", gap = 8, align = "center" }, {
         ui.button({
             text = noctalia.tr("panel.open_dashboard"),
             variant = "default",
@@ -826,7 +833,7 @@ function render()
     local content = {}
 
     -- 1. Header (Title + Settings button + Close button)
-    table.insert(content, ui.row({ align = "center", justify = "space_between", gap = 8 }, {
+    table.insert(content, ui.row({ key = "panel-header", align = "center", justify = "space_between", gap = 8 }, {
         ui.row({ align = "center", gap = 8 }, {
             ui.glyph({ name = "route", size = 20, color = "primary" }),
             ui.label({ text = noctalia.tr("panel.title"), fontSize = 16, fontWeight = "bold", color = "on_surface" }),
@@ -865,9 +872,18 @@ function render()
         view_items = render_activity_view()
     end
 
-    table.insert(content, ui.scroll({ flexGrow = 1, gap = 10 }, view_items))
+    table.insert(content, ui.scroll({
+        key = "scroll-" .. selected_tab,
+        flexGrow = 1,
+        gap = 10,
+        align = "stretch",
+    }, view_items))
 
-    panel.render(ui.column({ flexGrow = 1, gap = 10 }, content))
+    panel.render(ui.column({
+        flexGrow = 1,
+        gap = 10,
+        align = "stretch",
+    }, content))
 end
 
 -- ── State Watcher ───────────────────────────────────────────────────────────
