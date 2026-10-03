@@ -5,8 +5,9 @@ plugin_api = 15
 author = "bardiz12"
 license = "MIT"
 icon = "route"
-description = "Live 9Router  monitor: active traffic indicator, last used model, request history, and quota tracker"
-tags = ["ai", "monitoring", "status", "bar", "panel"]
+description = "Live 9Router monitor: active traffic indicator, last used model, request history, and quota tracker"
+dependencies = ["curl", "secret-tool"]
+tags = ["ai", "indicator", "bar", "panel", "service", "utility"]
 
 # ── Plugin-level settings ─────────────────────────────────────────────────────
 
