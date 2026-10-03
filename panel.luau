@@ -167,6 +167,19 @@ end
 
 local render
 
+local function set_tab(t)
+    if t == "activity" or t == "models" or t == "quotas" then
+        if selected_tab ~= t then
+            selected_tab = t
+            noctalia.state.set("9router.active_tab", t)
+            if t == "quotas" then
+                noctalia.state.set("9router.command", { action = "refresh_quotas" })
+            end
+            render()
+        end
+    end
+end
+
 local function render_tabs()
     return ui.row({ key = "panel-tabs", align = "center", justify = "space_between", gap = 8 }, {
         ui.row({ align = "center", gap = 4 }, {
@@ -176,8 +189,7 @@ local function render_tabs()
                 glyphSize = 13,
                 variant = (selected_tab == "activity") and "primary" or "ghost",
                 onClick = function()
-                    selected_tab = "activity"
-                    render()
+                    set_tab("activity")
                 end,
             }),
             ui.button({
@@ -186,8 +198,7 @@ local function render_tabs()
                 glyphSize = 13,
                 variant = (selected_tab == "models") and "primary" or "ghost",
                 onClick = function()
-                    selected_tab = "models"
-                    render()
+                    set_tab("models")
                 end,
             }),
             ui.button({
@@ -196,9 +207,7 @@ local function render_tabs()
                 glyphSize = 13,
                 variant = (selected_tab == "quotas") and "primary" or "ghost",
                 onClick = function()
-                    selected_tab = "quotas"
-                    noctalia.state.set("9router.command", { action = "refresh_quotas" })
-                    render()
+                    set_tab("quotas")
                 end,
             }),
         }),
@@ -897,10 +906,55 @@ end
 
 noctalia.state.watch("9router.status", on_status_changed)
 
+noctalia.state.watch("9router.active_tab", function(new_tab)
+    if type(new_tab) == "string" and (new_tab == "activity" or new_tab == "models" or new_tab == "quotas") then
+        if selected_tab ~= new_tab then
+            selected_tab = new_tab
+            render()
+        end
+    end
+end)
+
+function onIpc(event, payload)
+    local ev = tostring(event or ""):lower():match("^%s*(.-)%s*$")
+    if ev == "set-tab" or ev == "tab" then
+        local t = tostring(payload or ""):lower():match("^%s*(.-)%s*$")
+        set_tab(t)
+    elseif ev == "next-tab" or ev == "cycle-tab" then
+        if selected_tab == "activity" then
+            set_tab("models")
+        elseif selected_tab == "models" then
+            set_tab("quotas")
+        else
+            set_tab("activity")
+        end
+    elseif ev == "prev-tab" then
+        if selected_tab == "activity" then
+            set_tab("quotas")
+        elseif selected_tab == "quotas" then
+            set_tab("models")
+        else
+            set_tab("activity")
+        end
+    elseif ev == "activity" or ev == "models" or ev == "quotas" then
+        set_tab(ev)
+    elseif ev == "refresh" then
+        refresh_data()
+    elseif ev == "open-dashboard" then
+        open_dashboard()
+    elseif ev == "logout" then
+        logout()
+    end
+end
+
 function onOpen(_context)
     local cur = noctalia.state.get("9router.status")
     if type(cur) == "table" then
         status = cur
+    end
+    local saved_tab = noctalia.state.get("9router.active_tab")
+    if type(saved_tab) == "string" and (saved_tab == "activity" or saved_tab == "models" or saved_tab == "quotas") then
+        selected_tab = saved_tab
     end
     noctalia.state.set("9router.command", { action = "refresh_quotas" })
     render()

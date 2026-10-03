@@ -837,6 +837,24 @@ local function handle_action(action, payload)
         end
     elseif action == "stored_login" then
         try_stored_login()
+    elseif action == "set-tab" or action == "tab" then
+        local t = tostring(payload or ""):lower():match("^%s*(.-)%s*$")
+        if t == "activity" or t == "models" or t == "quotas" then
+            noctalia.state.set("9router.active_tab", t)
+        end
+    elseif action == "next-tab" or action == "cycle-tab" then
+        local cur = noctalia.state.get("9router.active_tab") or "activity"
+        local nxt = if cur == "activity" then "models" elseif cur == "models" then "quotas" else "activity"
+        noctalia.state.set("9router.active_tab", nxt)
+    elseif action == "prev-tab" then
+        local cur = noctalia.state.get("9router.active_tab") or "activity"
+        local prv = if cur == "activity" then "quotas" elseif cur == "quotas" then "models" else "activity"
+        noctalia.state.set("9router.active_tab", prv)
+    elseif action == "activity" or action == "models" or action == "quotas" then
+        noctalia.state.set("9router.active_tab", action)
+    elseif action == "open-dashboard" then
+        local base = base_url or "http://localhost:20128"
+        noctalia.runAsync({ "xdg-open", base .. "/dashboard/usage" })
     elseif action == "logout" then
         do_logout()
     elseif action == "reconnect" then
