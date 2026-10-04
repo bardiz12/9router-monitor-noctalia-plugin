@@ -16,14 +16,6 @@
       "label": "Kata sandi dashboard",
       "description": "Kata sandi untuk autentikasi ke dashboard 9Router."
     },
-    "dashboard_host": {
-      "label": "Host dashboard",
-      "description": "Nama host atau alamat IP server 9Router (misal localhost, 127.0.0.1)."
-    },
-    "dashboard_port": {
-      "label": "Port dashboard",
-      "description": "Port server 9Router berjalan (default 20128)."
-    },
     "base_url": {
       "label": "URL Dasar",
       "description": "URL lengkap server 9Router."

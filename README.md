@@ -52,6 +52,7 @@ Inspired by [omarchy-9router-monitor](https://github.com/jhonoryza/omarchy-9rout
 - Pure Luau — zero external runtime dependencies (no Python required)
 - `curl` (standard utility, used as workaround for optional password login)
 - `secret-tool` (optional, for keyring password persistence)
+- `xdg-open` (standard utility, used to open the 9Router web dashboard in your default browser)
 - A running 9Router instance (default `http://localhost:20128`)
 
 ## Installation
@@ -104,9 +105,7 @@ Available under **Settings → Plugins → 9Router Monitor**:
 | `auth_mode` | `cli_token` | Authentication method (`cli_token` or `password`). |
 | `cli_token_path` | `~/.9router` | Directory containing CLI secrets (`machine-id` and `auth/cli-secret`). |
 | `dashboard_password` | `""` | Password used to authenticate with 9Router (when `auth_mode = "password"`). |
-| `dashboard_host` | `localhost` | Hostname or IP address of the 9Router server. |
-| `dashboard_port` | `20128` | Port where 9Router is listening. |
-| `base_url` | `http://localhost:20128` | Full URL (used if host/port are empty). |
+| `base_url` | `http://localhost:20128` | Base URL of the 9Router server (supports host, port, IPv6, and subpaths). |
 | `refresh_seconds` | `5` | Heartbeat poll interval (seconds) if stream disconnects. |
 | `show_model_label` | `true` | Show model text in the bar pill (false shows icon only). |
 | `remember_password`| `true` | Save password in system keyring for automatic re-login. |

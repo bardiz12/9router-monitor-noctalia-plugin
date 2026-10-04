@@ -16,14 +16,6 @@
       "label": "Dashboard password",
       "description": "Password used to authenticate with 9Router dashboard."
     },
-    "dashboard_host": {
-      "label": "Dashboard host",
-      "description": "Hostname or IP address of the 9Router server (e.g. localhost, 127.0.0.1)."
-    },
-    "dashboard_port": {
-      "label": "Dashboard port",
-      "description": "Port where 9Router is listening (default 20128)."
-    },
     "base_url": {
       "label": "Base URL",
       "description": "Full base URL of the 9Router server."

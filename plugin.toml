@@ -6,7 +6,7 @@ author = "bardiz12"
 license = "MIT"
 icon = "route"
 description = "Live 9Router monitor: active traffic indicator, last used model, request history, and quota tracker"
-dependencies = ["curl", "secret-tool"]
+dependencies = ["curl", "secret-tool", "xdg-open"]
 tags = ["ai", "indicator", "bar", "panel", "service", "utility"]
 
 # ── Plugin-level settings ─────────────────────────────────────────────────────
@@ -37,22 +37,6 @@ label_key = "settings.dashboard_password.label"
 description_key = "settings.dashboard_password.description"
 default = ""
 visible_when = { key = "auth_mode", values = ["password"] }
-
-[[setting]]
-key = "dashboard_host"
-type = "string"
-label_key = "settings.dashboard_host.label"
-description_key = "settings.dashboard_host.description"
-default = "localhost"
-
-[[setting]]
-key = "dashboard_port"
-type = "int"
-label_key = "settings.dashboard_port.label"
-description_key = "settings.dashboard_port.description"
-default = 20128
-min = 1
-max = 65535
 
 [[setting]]
 key = "base_url"

@@ -9,28 +9,51 @@ local sha256 = require("./sha256.luau")
 
 local data_dir = noctalia.pluginDataDir()
 local state_file = data_dir .. "/last.json"
-local cookie_file = data_dir .. "/cookie.txt"
+local cookies_file = data_dir .. "/cookies.json"
 
 local KEYRING_SERVICE = "9router-monitor"
-local KEYRING_ACCOUNT = "dashboard"
+
+local storage_ready = false
+
+local function ensure_secure_storage(callback)
+    pcall(noctalia.mkdirAll, data_dir)
+    -- Enforce 0700 on plugin data directory and 0600 on files inside (fail-closed)
+    noctalia.runAsync({
+        "sh", "-c",
+        "chmod 700 \"$1\" && find \"$1\" -type f -exec chmod 600 {} + 2>/dev/null",
+        "sh", data_dir
+    }, function(result)
+        local ok = (result ~= nil and result.exitCode == 0 and not result.timedOut)
+        if callback then callback(ok) end
+    end)
+end
+
+local function write_secure_temp_file(prefix, content, callback)
+    if not storage_ready then
+        callback(nil, "Storage is not secured yet")
+        return
+    end
+
+    local tmp_path = data_dir .. "/" .. prefix .. "_" .. tostring(os.time()) .. "_" .. tostring(math.random(10000, 99999))
+    local written = noctalia.writeFile(tmp_path, content)
+    if not written then
+        callback(nil, "Failed to write secure temporary file")
+        return
+    end
+
+    -- Explicitly enforce 0600 on the file before invoking reader process (fail-closed)
+    noctalia.runAsync({ "chmod", "600", tmp_path }, function(res)
+        local ok = (res ~= nil and res.exitCode == 0 and not res.timedOut)
+        if ok then
+            callback(tmp_path, nil)
+        else
+            pcall(noctalia.removeFile, tmp_path)
+            callback(nil, "Failed to secure temporary file permissions")
+        end
+    end)
+end
 
 -- ── Configuration helpers ───────────────────────────────────────────────────
-
-local function cfg_host()
-    local h = noctalia.getConfig("dashboard_host")
-    if type(h) == "string" and h:match("%S") then
-        return h:match("^%s*(.-)%s*$")
-    end
-    return "localhost"
-end
-
-local function cfg_port()
-    local p = noctalia.getConfig("dashboard_port")
-    if type(p) == "number" and p > 0 and p <= 65535 then
-        return math.floor(p)
-    end
-    return 20128
-end
 
 local function cfg_refresh_seconds()
     local s = noctalia.getConfig("refresh_seconds")
@@ -84,24 +107,75 @@ local function cfg_dashboard_password()
     return ""
 end
 
-local function get_resolved_url()
-    local host = cfg_host()
-    local port = cfg_port()
-    if host ~= "" and port > 0 then
-        local scheme = "http"
-        if host:match("^https://") then
-            scheme = "https"
-            host = host:gsub("^https://", "")
-        elseif host:match("^http://") then
-            host = host:gsub("^http://", "")
-        end
-        return string.format("%s://%s:%d", scheme, host, port)
-    end
-    local base = noctalia.getConfig("base_url")
-    if type(base) == "string" and base ~= "" then
-        return base:gsub("/+$", "")
+local function cfg_base_url()
+    local b = noctalia.getConfig("base_url")
+    if type(b) == "string" and b:match("%S") then
+        return b:match("^%s*(.-)%s*$"):gsub("/+$", "")
     end
     return "http://localhost:20128"
+end
+
+local function parse_endpoint(raw_url)
+    local raw = (type(raw_url) == "string") and raw_url:match("^%s*(.-)%s*$") or ""
+    if raw == "" then
+        raw = "http://localhost:20128"
+    end
+
+    local scheme = "http"
+    if raw:match("^https?://") then
+        scheme = raw:match("^(https?)://"):lower()
+        raw = raw:gsub("^https?://", "")
+    end
+
+    local path = ""
+    local slash_idx = raw:find("/")
+    if slash_idx then
+        path = raw:sub(slash_idx):gsub("/+$", "")
+        raw = raw:sub(1, slash_idx - 1)
+    end
+
+    local host_clean = ""
+    local port = nil
+
+    local ipv6_host, ipv6_port = raw:match("^%[([%a%d%:]+)%]:?(%d*)$")
+    if ipv6_host then
+        host_clean = "[" .. ipv6_host:lower() .. "]"
+        if ipv6_port and ipv6_port ~= "" then
+            port = tonumber(ipv6_port)
+        end
+    else
+        local colon_port = raw:match(":(%d+)$")
+        if colon_port then
+            port = tonumber(colon_port)
+            raw = raw:gsub(":%d+$", "")
+        end
+        host_clean = raw:lower()
+    end
+
+    if host_clean == "" then
+        host_clean = "localhost"
+    end
+
+    local is_default_port = (scheme == "http" and (port == 80 or port == nil)) or (scheme == "https" and (port == 443 or port == nil))
+    local origin
+    if is_default_port then
+        origin = string.format("%s://%s", scheme, host_clean)
+    else
+        origin = string.format("%s://%s:%d", scheme, host_clean, port or 20128)
+    end
+
+    local resolved_url = origin .. path
+    return origin, resolved_url
+end
+
+local function get_origin()
+    local origin, _ = parse_endpoint(cfg_base_url())
+    return origin
+end
+
+local function get_resolved_url()
+    local _, resolved = parse_endpoint(cfg_base_url())
+    return resolved
 end
 
 -- ── Service State ───────────────────────────────────────────────────────────
@@ -152,23 +226,72 @@ local function save_last()
         last_provider = last_provider,
         last_timestamp = last_timestamp,
     }
-    pcall(noctalia.writeFile, state_file, noctalia.json.encode(data))
+    local written = noctalia.writeFile(state_file, noctalia.json.encode(data))
+    if written then
+        noctalia.runAsync({ "chmod", "600", state_file })
+    end
 end
 
-local function load_saved_cookie()
-    local raw = noctalia.readFile(cookie_file)
+local current_origin = ""
+local current_generation = 1
+local cookies_by_origin = {}
+
+local function load_saved_cookies()
+    local raw = noctalia.readFile(cookies_file)
     if type(raw) == "string" and raw ~= "" then
-        session_cookie = raw:match("^%s*(.-)%s*$")
+        local data = noctalia.json.decode(raw)
+        if type(data) == "table" then
+            cookies_by_origin = data
+        end
     end
+
+    session_cookie = cookies_by_origin[get_origin()] or ""
 end
 
-local function save_cookie(cookie)
-    session_cookie = cookie
-    if cookie and cookie ~= "" then
-        pcall(noctalia.writeFile, cookie_file, cookie)
-    else
-        pcall(noctalia.removeFile, cookie_file)
+local function save_cookie_for_origin(origin, cookie, callback)
+    local prev_cookie = cookies_by_origin[origin]
+    local prev_session = session_cookie
+
+    cookies_by_origin[origin] = cookie
+    if origin == get_origin() then
+        session_cookie = cookie or ""
     end
+    local encoded = noctalia.json.encode(cookies_by_origin)
+    local written = noctalia.writeFile(cookies_file, encoded)
+    if not written then
+        cookies_by_origin[origin] = prev_cookie
+        if origin == get_origin() then
+            session_cookie = prev_session
+        end
+        if callback then callback(false) end
+        return
+    end
+
+    noctalia.runAsync({ "chmod", "600", cookies_file }, function(res)
+        local ok = (res ~= nil and res.exitCode == 0 and not res.timedOut)
+        if not ok then
+            pcall(noctalia.removeFile, cookies_file)
+            cookies_by_origin[origin] = prev_cookie
+            if origin == get_origin() then
+                session_cookie = prev_session
+            end
+            error_text = "Failed to secure cookies storage"
+            publish_state()
+            if callback then callback(false) end
+            return
+        end
+        if callback then callback(true) end
+    end)
+end
+
+local function clear_cookie_for_origin(origin)
+    cookies_by_origin[origin] = nil
+    if origin == get_origin() then
+        session_cookie = ""
+    end
+    local encoded = noctalia.json.encode(cookies_by_origin)
+    pcall(noctalia.writeFile, cookies_file, encoded)
+    noctalia.runAsync({ "chmod", "600", cookies_file })
 end
 
 -- ── Authentication Token & Headers ──────────────────────────────────────────
@@ -447,6 +570,7 @@ end
 -- ── Polling: Quotas & Model Stats ───────────────────────────────────────────
 
 local function fetch_quotas()
+    local gen = current_generation
     local base = get_resolved_url()
     local headers = get_auth_headers()
     table.insert(headers, "Accept: application/json")
@@ -456,6 +580,7 @@ local function fetch_quotas()
         method = "GET",
         headers = headers,
     }, function(res)
+        if gen ~= current_generation then return end
         if not res or not res.ok or res.status ~= 200 or not res.body then
             return
         end
@@ -468,6 +593,7 @@ local function fetch_quotas()
         local pending = #connections
 
         if pending == 0 then
+            if gen ~= current_generation then return end
             quotas = new_quotas
             publish_state()
             return
@@ -489,6 +615,7 @@ local function fetch_quotas()
                     method = "GET",
                     headers = q_headers,
                 }, function(qres)
+                    if gen ~= current_generation then return end
                     pending -= 1
                     local quotas_list = {}
                     local plan = ""
@@ -534,6 +661,7 @@ local function fetch_quotas()
                     })
 
                     if pending <= 0 then
+                        if gen ~= current_generation then return end
                         table.sort(new_quotas, function(a, b) return (a.priority or 1) < (b.priority or 1) end)
                         quotas = new_quotas
                         publish_state()
@@ -547,6 +675,7 @@ local function fetch_quotas()
 end
 
 local function fetch_models_usage_all()
+    local gen = current_generation
     local base = get_resolved_url()
     local periods = { "today", "24h", "7d", "30d", "60d" }
 
@@ -559,6 +688,7 @@ local function fetch_models_usage_all()
             method = "GET",
             headers = headers,
         }, function(res)
+            if gen ~= current_generation then return end
             if not res or not res.ok or res.status ~= 200 or not res.body then
                 return
             end
@@ -673,6 +803,7 @@ end
 local function start_stream()
     if stream_active then return end
 
+    local gen = current_generation
     local base = get_resolved_url()
     local headers = get_auth_headers()
     table.insert(headers, "Accept: text/event-stream")
@@ -683,6 +814,7 @@ local function start_stream()
         method = "GET",
         headers = headers,
     }, function(line)
+        if gen ~= current_generation then return end
         if line:sub(1, 5) == "data:" then
             local json_str = line:sub(6)
             if json_str:sub(1, 1) == " " then
@@ -694,6 +826,7 @@ local function start_stream()
             end
         end
     end, function(result)
+        if gen ~= current_generation then return end
         current_stream_handle = nil
         stream_active = false
         if result and result.status == 401 then
@@ -704,31 +837,59 @@ local function start_stream()
                 noctalia.state.set("9router.command", { action = "stored_login" })
             end
         else
+            if auth ~= "expired" then
+                auth = "offline"
+                publish_state()
+            end
             next_stream_reconnect_ms = noctalia.nowMs() + 3000
         end
     end)
 
     if not current_stream_handle then
+        if gen ~= current_generation then return end
         stream_active = false
+        if auth ~= "expired" then
+            auth = "offline"
+            publish_state()
+        end
         next_stream_reconnect_ms = noctalia.nowMs() + 4000
     end
 end
 
--- ── Password Login & Keyring (Subprocess curl Workaround) ───────────────────
+-- ── Password Login & Keyring ────────────────────────────────────────────────
 
 local function remember_secret(secret)
     if not cfg_remember_password() or not secret or secret == "" then return end
-    noctalia.runAsync({
-        "sh", "-c",
-        string.format("printf '%%s\\n' %q | secret-tool store --label='9Router dashboard password' service %q account %q", secret, KEYRING_SERVICE, KEYRING_ACCOUNT)
-    })
+    local gen = current_generation
+    local origin = get_origin()
+
+    write_secure_temp_file(".sec_tmp", secret, function(tmp_path, err)
+        if gen ~= current_generation or origin ~= get_origin() then
+            if tmp_path then pcall(noctalia.removeFile, tmp_path) end
+            return
+        end
+        if not tmp_path then return end
+        -- Feed secret to secret-tool via stdin redirection from private 0600 file.
+        -- Positional parameters $1, $2, $3 prevent shell string interpolation or cmdline exposure.
+        noctalia.runAsync({
+            "sh", "-c",
+            "secret-tool store --label=\"$1\" service \"9router-monitor\" origin \"$2\" < \"$3\"; rm -f \"$3\"",
+            "sh",
+            "9Router dashboard password (" .. origin .. ")",
+            origin,
+            tmp_path
+        }, function(_)
+            pcall(noctalia.removeFile, tmp_path)
+        end)
+    end)
 end
 
 local function forget_secret()
+    local origin = get_origin()
     noctalia.runAsync({
         "secret-tool", "clear",
         "service", KEYRING_SERVICE,
-        "account", KEYRING_ACCOUNT
+        "origin", origin
     })
 end
 
@@ -739,62 +900,98 @@ local function do_password_login(password, on_complete)
     login_error = ""
     publish_state()
 
-    local base = get_resolved_url()
+    local gen = current_generation
+    local origin = get_origin()
+    local resolved = get_resolved_url()
     local payload = noctalia.json.encode({ password = secret })
 
-    noctalia.runAsync({
-        "curl", "-s", "-i", "-X", "POST",
-        base .. "/api/auth/login",
-        "-H", "Content-Type: application/json",
-        "-d", payload
-    }, function(result)
-        logging_in = false
-        if not result or result.exitCode ~= 0 then
-            login_error = "curl failed to contact 9Router"
+    write_secure_temp_file(".login_tmp", payload, function(tmp_payload, err)
+        if gen ~= current_generation or origin ~= get_origin() then
+            logging_in = false
+            if tmp_payload then pcall(noctalia.removeFile, tmp_payload) end
+            if on_complete then on_complete(false) end
+            return
+        end
+
+        if not tmp_payload then
+            logging_in = false
+            login_error = err or "Failed to write temporary credentials"
             publish_state()
             if on_complete then on_complete(false) end
             return
         end
 
-        local stdout = result.stdout or ""
-        local cookie = stdout:match("[Ss]et%-[Cc]ookie:%s*(session=[^;\r\n]+)")
-        if not cookie then
-            cookie = stdout:match("[Ss]et%-[Cc]ookie:%s*([^;\r\n]+)")
-        end
+        -- Pass credentials via file to curl --data-binary so secret never appears in process cmdline
+        noctalia.runAsync({
+            "curl", "-s", "-i", "-X", "POST",
+            resolved .. "/api/auth/login",
+            "-H", "Content-Type: application/json",
+            "--data-binary", "@" .. tmp_payload
+        }, function(result)
+            pcall(noctalia.removeFile, tmp_payload)
+            logging_in = false
 
-        if cookie and cookie ~= "" then
-            save_cookie(cookie)
-            remember_secret(secret)
-            auth = "ok"
-            login_error = ""
-            publish_state()
-
-            fetch_quotas()
-            fetch_models_usage_all()
-            stop_stream()
-            start_stream()
-            if on_complete then on_complete(true) end
-        else
-            local status_code = tonumber(stdout:match("HTTP/[%d%.]+%s+(%d+)")) or 0
-            if status_code == 401 then
-                login_error = "Invalid password"
-            else
-                login_error = "Login failed (HTTP " .. tostring(status_code) .. ")"
+            -- Check if generation or origin changed while curl was in flight; discard if target switched
+            if gen ~= current_generation or origin ~= get_origin() then
+                if on_complete then on_complete(false) end
+                return
             end
-            auth = "expired"
-            publish_state()
-            if on_complete then on_complete(false) end
-        end
+
+            if not result or result.exitCode ~= 0 then
+                login_error = "curl failed to contact 9Router"
+                publish_state()
+                if on_complete then on_complete(false) end
+                return
+            end
+
+            local stdout = result.stdout or ""
+            local cookie = stdout:match("[Ss]et%-[Cc]ookie:%s*(session=[^;\r\n]+)")
+            if not cookie then
+                cookie = stdout:match("[Ss]et%-[Cc]ookie:%s*([^;\r\n]+)")
+            end
+
+            if cookie and cookie ~= "" then
+                save_cookie_for_origin(origin, cookie, function(saved_ok)
+                    if not saved_ok or gen ~= current_generation or origin ~= get_origin() then
+                        if on_complete then on_complete(false) end
+                        return
+                    end
+                    remember_secret(secret)
+                    auth = "ok"
+                    login_error = ""
+                    publish_state()
+
+                    fetch_quotas()
+                    fetch_models_usage_all()
+                    stop_stream()
+                    start_stream()
+                    if on_complete then on_complete(true) end
+                end)
+            else
+                local status_code = tonumber(stdout:match("HTTP/[%d%.]+%s+(%d+)")) or 0
+                if status_code == 401 then
+                    login_error = "Invalid password"
+                else
+                    login_error = "Login failed (HTTP " .. tostring(status_code) .. ")"
+                end
+                auth = "expired"
+                publish_state()
+                if on_complete then on_complete(false) end
+            end
+        end)
     end)
 end
 
 local function try_stored_login()
     if not cfg_remember_password() or logging_in then return end
+    local gen = current_generation
+    local origin = get_origin()
     noctalia.runAsync({
         "secret-tool", "lookup",
         "service", KEYRING_SERVICE,
-        "account", KEYRING_ACCOUNT
+        "origin", origin
     }, function(result)
+        if gen ~= current_generation or origin ~= get_origin() then return end
         if result and result.exitCode == 0 and type(result.stdout) == "string" then
             local stored = result.stdout:match("^[^\r\n]+")
             if stored and stored ~= "" then
@@ -805,10 +1002,12 @@ local function try_stored_login()
 end
 
 local function do_logout()
+    local origin = get_origin()
+    current_generation += 1
     auth = "expired"
     active_requests = {}
     login_error = ""
-    save_cookie("")
+    clear_cookie_for_origin(origin)
     forget_secret()
     stop_stream()
     publish_state()
@@ -819,9 +1018,55 @@ end
 local function refresh_all()
     fetch_quotas()
     fetch_models_usage_all()
-    if not stream_active and auth == "ok" then
+    if not stream_active and auth ~= "expired" then
         start_stream()
     end
+end
+
+local function reset_runtime_state()
+    active_requests = {}
+    recent_requests = {}
+    quotas = {}
+    models_usage = { ["today"] = {}, ["24h"] = {}, ["7d"] = {}, ["30d"] = {}, ["60d"] = {} }
+    period_totals = { ["today"] = {}, ["24h"] = {}, ["7d"] = {}, ["30d"] = {}, ["60d"] = {} }
+    last_model = ""
+    last_provider = ""
+    last_timestamp = ""
+    auth = "unknown"
+    error_text = ""
+    login_error = ""
+    seen_primed = false
+    last_seen_key = ""
+    last_arrival_ms = 0
+end
+
+local current_auth_mode = ""
+
+local function switch_origin_or_auth()
+    local new_origin = get_origin()
+    local new_auth = cfg_auth_mode()
+    local changed = false
+
+    if new_origin ~= current_origin then
+        current_origin = new_origin
+        session_cookie = cookies_by_origin[new_origin] or ""
+        reset_runtime_state()
+        changed = true
+    end
+
+    if new_auth ~= current_auth_mode then
+        current_auth_mode = new_auth
+        if not changed then
+            reset_runtime_state()
+            changed = true
+        end
+    end
+
+    if changed then
+        current_generation += 1
+    end
+
+    return changed
 end
 
 local function handle_action(action, payload)
@@ -853,15 +1098,14 @@ local function handle_action(action, payload)
     elseif action == "activity" or action == "models" or action == "quotas" then
         noctalia.state.set("9router.active_tab", action)
     elseif action == "open-dashboard" then
-        local base = base_url or "http://localhost:20128"
+        local base = get_resolved_url()
         noctalia.runAsync({ "xdg-open", base .. "/dashboard/usage" })
     elseif action == "logout" then
         do_logout()
     elseif action == "reconnect" then
         stop_stream()
-        seen_primed = false
-        last_seen_key = ""
-        last_arrival_ms = 0
+        switch_origin_or_auth()
+        current_generation += 1
         auth = "unknown"
         error_text = ""
         login_error = ""
@@ -883,6 +1127,10 @@ function onIpc(event, payload)
 end
 
 function onConfigChanged()
+    local changed = switch_origin_or_auth()
+    if changed then
+        publish_state()
+    end
     handle_action("reconnect", nil)
 end
 
@@ -892,29 +1140,63 @@ end
 
 -- ── Startup ─────────────────────────────────────────────────────────────────
 
-load_saved_last()
-load_saved_cookie()
-publish_state()
+local function start_service()
+    current_origin = get_origin()
+    current_auth_mode = cfg_auth_mode()
+    load_saved_last()
+    load_saved_cookies()
+    publish_state()
 
--- Initial data pull and stream connect
-refresh_all()
-start_stream()
+    -- Initial data pull and stream connect
+    refresh_all()
+    start_stream()
 
--- If password mode configured with password, perform initial login
-if cfg_auth_mode() == "password" and cfg_dashboard_password() ~= "" and session_cookie == "" then
-    do_password_login(cfg_dashboard_password())
+    -- If password mode configured with password, perform initial login
+    if cfg_auth_mode() == "password" and cfg_dashboard_password() ~= "" and session_cookie == "" then
+        do_password_login(cfg_dashboard_password())
+    end
 end
+
+local storage_checking = false
+local storage_retry_ticks = 0
+
+local function check_storage()
+    if storage_ready or storage_checking then return end
+    storage_checking = true
+    ensure_secure_storage(function(ok)
+        storage_checking = false
+        if ok then
+            storage_ready = true
+            error_text = ""
+            start_service()
+        else
+            error_text = "Storage security error: chmod failed"
+            publish_state()
+        end
+    end)
+end
+
+check_storage()
 
 -- ── Periodic Heartbeat Loop ─────────────────────────────────────────────────
 
 function update()
+    if not storage_ready then
+        storage_retry_ticks += 1
+        if storage_retry_ticks >= 5 then
+            storage_retry_ticks = 0
+            check_storage()
+        end
+        return
+    end
+
     ticks_since_poll += 1
 
     -- Update busy state in real-time
     publish_state()
 
     -- Reconnect stream if it dropped
-    if not stream_active and auth == "ok" and noctalia.nowMs() >= next_stream_reconnect_ms then
+    if not stream_active and auth ~= "expired" and noctalia.nowMs() >= next_stream_reconnect_ms then
         start_stream()
     end
 
